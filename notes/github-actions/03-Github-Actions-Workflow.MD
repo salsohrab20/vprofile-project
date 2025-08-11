@@ -248,3 +248,352 @@ Value: 30
 - Either switch back to the default Sonar Way quality gate, or
 - Modify the threshold in your custom gate (e.g., set bugs < 50)
 - Re-run the workflow to confirm success.
+
+# CI/CD Workflow Summary – GitHub Actions + AWS ECR/RDS Setup
+
+## ✅ Completed: Code Testing & Analysis
+
+The **first job** in the GitHub Actions workflow performs:
+
+- Fetching source code
+- Unit testing using **Maven**
+- Code analysis with **SonarQube** via **SonarCloud**
+- Quality gate checks via SonarCloud
+
+✅ This concludes the CI stage.
+
+---
+
+## 🏗️ Next Step: Build & Push Docker Image to AWS ECR
+
+### Objective
+
+- Build a **Docker image** from the source code.
+- Push the image to **Amazon ECR (Elastic Container Registry)**.
+
+> ⚠️ Note: Although in a true GitOps project infrastructure would be provisioned using **Terraform**, here we are focusing only on the **CI/CD** portion. Setup will be **manual** for this project.
+
+---
+
+## 🛠️ AWS Setup (Manual)
+
+### 1. Create IAM User (for GitHub Actions)
+
+- Go to **IAM → Users → Create User**
+- Attach the following policies:
+  - `AmazonEC2ContainerRegistryFullAccess`
+  - `AmazonECS_FullAccess`  
+    ⚠️ Use **custom, minimal policies** in production environments.
+- Generate **Access Key & Secret** and save them securely.
+
+---
+
+### 2. Create ECR Repository
+
+- Go to **ECR → Repositories → Create repository**
+- Set repository type to **private**
+- Name it e.g., `pro-app-actions`
+- GitHub Actions will handle the Docker push, so no need to use CLI push commands here.
+
+---
+
+### 3. Set Up RDS (MySQL)
+
+- Go to **RDS → Create database (Standard)**
+  - **Engine**: MySQL 8.0
+  - **Template**: Free Tier
+  - **DB Name**: `proapp-actions`
+  - **Username**: `admin`, **Password**: auto-generate (save it!)
+  - **Instance**: `db.t3.micro` (Free tier)
+- Create a custom **Security Group**:
+  - **Inbound Rule**: Port `3306` (MySQL)
+  - Source: Allow access from EC2 instance (MySQL client)
+
+---
+### 4. SSH into the instance:
+
+```bash
+ssh -i downloads/mysql-client-key.pem ubuntu@<EC2_PUBLIC_IP>
+````
+### 5. Initialize the Database
+
+- Launch a temporary **EC2 instance** (Ubuntu) to use as a **MySQL client**.
+- Install MySQL client:
+  ```bash
+  sudo -i
+   apt update && sudo apt install mysql-client -y
+  ```
+- Connect to RDS:
+```bash
+mysql -h <RDS_ENDPOINT> -u admin -p accounts
+````
+- Clone your GitHub repository and run schema:
+
+```bash
+git clone <repo-url>
+cd profile-project/src/main/resources
+mysql -h <RDS_ENDPOINT> -u admin -p accounts < db_backup.sql
+```
+- Verify:
+
+```sql
+SHOW TABLES;
+```
+- ✅ Exit and terminate the EC2 instance.
+
+### 🔐 Store AWS & DB Credentials in GitHub Secrets
+- Go to:
+- Repository → Settings → Secrets and variables → Actions
+- Add the following secrets:
+
+| Secret Name             | Description                         |
+| ----------------------- | ----------------------------------- |
+| `AWS_ACCESS_KEY_ID`     | IAM Access Key                      |
+| `AWS_SECRET_ACCESS_KEY` | IAM Secret Access Key               |
+| `AWS_ACCOUNT_ID`        | AWS Account ID                      |
+| `AWS_REGISTRY`          | ECR Registry URL (ends with `.com`) |
+| `RDS_USER`              | Database username (`admin`)         |
+| `RDS_PASS`              | Database password                   |
+| `RDS_ENDPOINT`          | RDS endpoint URL                    |
+
+>💡 Use exact secret names as above to match the workflow, or update them accordingly in the pipeline config.
+
+# 🐳 Build & Push Docker Image to AWS ECR – CI/CD Workflow
+
+In this lecture, we will:
+
+- Review the Dockerfile used for building the image.
+- Set up a GitHub Actions job to build and push the Docker image to **AWS ECR**.
+- Inject secrets into the application.
+- Configure job dependencies.
+
+---
+
+## 📦 Dockerfile Overview
+
+The project includes a **multi-stage Dockerfile**:
+
+### 🔹 Stage 1: Build
+
+- Uses `openjdk` base image.
+- Installs Maven.
+- Copies the full source code (`COPY ./ ./`).
+- Runs:
+```bash
+  mvn install
+```
+- to generate the build artifact (.war file).
+
+### 🔹 Stage 2: Package
+- Uses Tomcat base image.
+- Removes default ROOT app.
+- Copies the generated profile-v2.war into webapps/ROOT.war.
+- Exposes port 8080.
+- Starts Tomcat with:
+```text
+catalina.sh run
+```
+
+### Configuration Injection
+- 🔹 File: src/main/resources/application.properties
+- The file contains placeholder DB credentials:
+```properties
+jdbc.username=db01
+jdbc.password=admin123
+```
+- These will be replaced at runtime using sed with values stored in GitHub Secrets:
+- RDS_USER ,RDS_PASS ,RDS_ENDPOINT
+
+### ⚙️ GitHub Actions – Add Job to Build & Push Docker Image
+📁 File: .github/workflows/main.yml
+1. Define Environment Variable
+- At the top of the file:
+```yaml
+env:
+REGION: us-east-2  # Use your AWS region
+```
+2. Create New Job: build_and_publish
+```yaml
+build_and_publish:
+needs: testing   # Ensures this job runs after 'testing' job
+runs-on: ubuntu-latest
+steps:
+- name: Checkout code
+uses: actions/checkout@v3
+
+    - name: Update application.properties
+      run: |
+        sed -i "s/^jdbc.username.*/jdbc.username=${{ secrets.RDS_USER }}/" src/main/resources/application.properties
+        sed -i "s/^jdbc.password.*/jdbc.password=${{ secrets.RDS_PASS }}/" src/main/resources/application.properties
+        sed -i "s/^jdbc.url.*/jdbc.url=jdbc:mysql:\/\/${{ secrets.RDS_ENDPOINT }}:3306\/accounts/" src/main/resources/application.properties
+
+    - name: Build & Push Docker image to AWS ECR
+      uses: appleboy/docker-ecr-action@master
+      with:
+        access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        registry: ${{ secrets.AWS_REGISTRY }}
+        region: ${{ env.REGION }}
+        repository: pro-app-actions   # Replace with your ECR repo name
+        dockerfile: ./Dockerfile
+        context: ./
+        tags: latest,${{ github.run_number }}
+```
+### 🔁 Fix Job Parallelism with needs
+- By default, all jobs run in parallel.
+- To ensure that the build_and_publish job only runs after the testing job completes, add:
+```yaml
+needs: testing
+to the build_and_publish job.
+```
+
+### 🚀 Run the Workflow
+- Commit and push the workflow changes.
+- Trigger the workflow manually or by push.
+
+- Check GitHub Actions tab:
+
+- Testing runs first , Once it passes, build_and_publish is triggered
+
+### ✅ Verify Image in AWS ECR
+- Go to AWS ECR Console.
+- Open your repository (e.g., pro-app-actions).
+
+- You should see new image tags:
+> latest ; The build number (e.g., 8, 9, etc.)
+
+# ECS Cluster Setup and Service Deployment
+
+In this lecture, we will:
+
+- Set up an **AWS Elastic Container Service (ECS)** cluster.
+- Create a task definition for our container.
+- Create an ECS service with a load balancer.
+- Configure security groups and validate connectivity.
+
+---
+
+## Step 1: Create ECS Cluster
+
+- Search for **Elastic Container Service** in AWS Console.
+- Click **Create Cluster**.
+- Choose **Networking only (AWS Fargate)**.
+- Enter cluster name:  
+  `vPro-app-act2`
+- Make sure the region matches your ECR region (Ohio in this case).
+- Add a tag:  
+  Key: `Name`  
+  Value: `vPro-app-act2`
+- Click **Create**.  
+  *(Pause if needed until creation completes.)*
+
+---
+
+## Step 2: Create Task Definition
+
+- Go to **Task Definitions**.
+- Click **Create New Task Definition**.
+- Select **Fargate** launch type.
+- Set task name:  
+  `vpro-app-act-tdef`
+- Set memory to **2 GB** (to save costs).
+- Under **Task role**, select **Create new role**.
+- Add container:
+  - Container name: `vproapp`
+  - Image URI:  
+    Get this from your ECR repository via **View push commands** (exclude the `:latest` tag).
+  - Container port: `8080`
+- Enable **Enable logging** with **CloudWatch Logs** (important for troubleshooting).
+- Add tag:  
+  `app-act-dev`
+- Click **Create**.
+
+---
+
+## Step 3: Attach CloudWatch Logs Policy to Task Role
+
+- Open the task execution role in **IAM**.
+- Check if the role has **CloudWatch Logs Full Access** policy.
+- If not, **attach** the policy:
+  - Search: `CloudWatch Logs Full Access`
+  - Attach and save.
+
+---
+
+## Step 4: Create ECS Service
+
+- Go to your **Cluster**.
+- Click on **Services** > **Create**.
+- Select launch type: **Fargate**.
+- Service type: **Replica** (to run one or more copies).
+- Choose your task definition and revision.
+- Service name:  
+  `vPro-app-act-svc`
+- Number of tasks: `1`
+- Deployment type: **Rolling update** (default)
+- Deployment failure detection: **Uncheck** for now.
+- Networking:
+  - Keep subnet default.
+  - Create new Security Group with rules: `vpro-app-act-svc-sg`
+    - HTTP (port 80) from anywhere (0.0.0.0/0) — for load balancer.
+    - Custom TCP (port 8080) from anywhere — for container communication.
+- Load balancer:
+  - Select **Application Load Balancer**.
+  - Create new load balancer:
+    - Name: `vpro-app-act-ELB`
+    - Load balancer port: `80`
+  - Create new target group:
+    - Name: `vpro-app-act-TG`
+    - Health check path: `/login` (matches your app's login endpoint)
+- Add tag:  
+  `vpro-app-act-svc`
+- Click **Create**.
+
+*(Pause if needed until service deployment stabilizes.)*
+
+---
+
+## Step 5: Verify Deployment
+
+- Wait for service status to be **ACTIVE** and tasks running.
+- Go to the load balancer details.
+- Copy the **DNS name** (endpoint).
+- Open the endpoint in your browser.
+- Login with credentials:
+  - Username: `admin_vp`
+  - Password: `admin_vp`
+- Confirm login and connectivity.
+
+---
+
+## Step 6: Update Security Groups for Database Access
+
+- Go to **EC2** > **Security Groups** for your RDS instance.
+- Edit **Inbound rules**:
+  - Add rule:
+    - Type: MySQL/Aurora
+    - Port: 3306
+    - Source: ECS service security group (allow ECS tasks to connect)
+- Save.
+
+Try logging in again.
+
+---
+
+## Troubleshooting
+
+- If unable to login:
+  - Check security group rules.
+  - Make sure your database is initialized with the schema.
+  - Confirm the DB name is `accounts`.
+  - Use MySQL client on EC2 to run your DB backup SQL file again if needed.
+
+---
+
+## Next Steps
+
+- We have an ECS cluster running with a service and load balancer.
+- Next lecture will cover **deploying new Docker image tags automatically** on container updates.
+- Stay tuned!
+
+---
