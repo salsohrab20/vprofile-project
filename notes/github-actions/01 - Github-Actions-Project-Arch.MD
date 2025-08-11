@@ -53,7 +53,7 @@ Each **GitHub Actions workflow** consists of:
 1. Fetch source code from the GitHub repo.
 2. Run `mvn test` to execute unit tests.
 3. Run `Checkstyle` for code formatting checks.
-4. Use `Sonar Scanner` to analyze code and upload results to **SonarCloud**.
+4. Use `Sonar Cube` to analyze code and upload results to **SonarCloud**.
 5. Validate code via **SonarCloud quality gates**.
 
 ---
@@ -64,7 +64,7 @@ Each **GitHub Actions workflow** consists of:
 
 1. Fetch source code again.
 2. Build Docker image.
-3. Push image to **AWS ECR**.
+3. Push image to **AWS ECR**. (AWS ECR - Container Registry in AWS)
 
 > 💡 Other registries like Docker Hub or Google Container Registry can also be used.
 
@@ -78,7 +78,7 @@ Each **GitHub Actions workflow** consists of:
 2. Deploy service to **ECS Cluster**.
 3. ECS pulls image from ECR and runs the container.
 4. Connect container to **Amazon RDS**.
-5. Expose application via **Load Balancer**.
+5. Expose application via **Load Balancer** provided by ECS Services.
 
 ---
 
@@ -86,13 +86,13 @@ Each **GitHub Actions workflow** consists of:
 
 ```text
 Developer Pushes Code ➡️ GitHub Repository
-                    ⬇️
-GitHub Actions Workflow Triggered
-   ⬇️                ⬇️                     ⬇️
- Test Code     ➡️  Build Docker Image  ➡️  Deploy to ECS
-                        ⬇️                       ⬇️
-                   Push to ECR           Pull Image, Deploy Container
+                            ⬇️
+            GitHub Actions Workflow Triggered
+   ⬇️                ⬇️                               ⬇️
+ 1)Test Code     ➡️  2)Build Docker Image  ➡️   3) Deploy to ECS
+                          ⬇️                       ⬇️
+                        Push to ECR           Pull Image, Deploy Container ( from ECR)
                                                    ⬇️
-                                   App Connects to RDS + Exposed via Load Balancer
+                                          App Connects to RDS + Exposed via Load Balancer
 ```
 
