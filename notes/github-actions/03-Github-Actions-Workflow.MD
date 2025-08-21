@@ -321,7 +321,7 @@ ssh -i downloads/mysql-client-key.pem ubuntu@<EC2_PUBLIC_IP>
 - Install MySQL client:
   ```bash
   sudo -i
-   apt update && sudo apt install mysql-client -y
+   apt update &&  apt install mysql-client -y
   ```
 - Connect to RDS:
 ```bash
@@ -597,3 +597,148 @@ Try logging in again.
 - Stay tuned!
 
 ---
+
+# 🚀 Deploying Updated Docker Images to ECS using GitHub Actions
+
+In this lecture, we’ll extend our CI/CD pipeline by deploying the updated Docker image from AWS ECR to our ECS cluster.
+
+---
+
+## 🧠 Concept Recap
+
+- **ECS Task Definitions**: Define container settings (image, tag, CPU/memory, etc.).
+- **ECS Services**: Use task definitions to run containers and keep them healthy.
+- **Deployment**: We update the task definition with a new image tag and deploy it using GitHub Actions.
+
+---
+
+## 📁 Step 1: Get the Task Definition JSON
+
+1. Go to **ECS > Task Definitions**.
+2. Click your task definition revision.
+3. Click on the **JSON** tab.
+4. Copy the entire JSON.
+5. In your source code repo (VS Code), go to `-files/task-definition.json`:
+  - Delete old content.
+  - Paste the copied JSON.
+  - Save the file.
+
+---
+
+## ⚙️ Step 2: Create the Deploy Job in GitHub Actions
+
+### 🧩 Job Structure
+
+We’ll create a new job in the workflow that:
+
+- Depends on the `build-and-publish` job.
+- Updates the task definition file with the new image tag.
+- Pushes the new revision to ECS.
+- Waits for the service to become stable.
+
+### ✅ Job YAML Outline
+
+```yaml
+deploy:
+  name: Deploy to ECS
+  needs: build-and-publish
+  runs-on: ubuntu-latest
+  env:
+    ECR_REPOSITORY: act-app
+    SERVICE_NAME: vPro-app-act-svc-task1
+    CLUSTER_NAME: vPro-app-act
+    TASK_DEFINITION: -files/task-definition.json
+    CONTAINER_NAME: vPro-app
+
+  steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-2
+
+    - name: Update ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ${{ env.TASK_DEFINITION }}
+        container-name: ${{ env.CONTAINER_NAME }}
+        image: ${{ secrets.REGISTRY_URI }}/${{ env.ECR_REPOSITORY }}:${{ github.run_number }}
+
+    - name: Deploy to ECS service
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        service: ${{ env.SERVICE_NAME }}
+        cluster: ${{ env.CLUSTER_NAME }}
+        task-definition: ${{ steps.task-def.outputs.task-definition }}
+        wait-for-service-stability: true
+```
+## 📦 Step 3: Trigger Deployment on Code Push
+- Modify your workflow trigger to allow automatic deployment on push:
+
+```yaml
+on:
+  [workflow_dispatch, push]
+```
+- Now deployment will happen on every push as well as manually via GitHub UI.
+
+## 📌 Step 4: Commit and Push Workflow Changes
+- Save your workflow file.
+- Commit with message:
+```bash
+git commit -am "Added deploy job to ECS in workflow"
+
+Push:
+git push
+```
+## 🚀 Step 5: Monitor the Deployment
+- Go to GitHub Actions.
+- View the running workflow.
+- Watch as:
+- The image is built and pushed to ECR.
+- Task definition is updated.
+- ECS service deploys the new task.
+- Stability is confirmed via health checks.
+
+## 🔎 Validation
+- Open ECS > Cluster > Service > Tasks.
+- Click the running task.
+- Verify the image tag matches the github.run_number (e.g. 9).
+- Confirm revision number increased.
+- Check that task status is RUNNING and target is healthy.
+- Visit your load balancer DNS to confirm the app works.
+
+## 🧹 Cleanup (Optional but Recommended)
+- To avoid unnecessary charges:
+- 🔻 Delete ECS Resources
+       Delete ECS Service:
+- Go to your cluster > service.
+- Choose Delete service > type delete.
+- Delete ECS Cluster:
+- Go to Clusters > choose yours > click Delete.
+- Confirm with cluster name.
+
+## 🔒 Delete IAM User
+- Go to IAM > Users > select the user.
+- Choose Delete user.
+
+## 🧠 Recap
+- Here’s what we achieved:
+- Built a complete CI/CD pipeline using GitHub Actions.
+- Used SonarCloud for code quality.
+- Built and pushed Docker images to AWS ECR.
+- Deployed to ECS Fargate via updated task definitions.
+- Validated through health checks and load balancer.
+- Triggered deployment on code push or manually.
+
+## 🌱 What's Next?
+- In future projects:
+- Use Terraform for full infrastructure as code.
+- Replace ECS with Kubernetes (EKS).
+- Manage pipelines with GitOps principles.
+
+> ✅ GitHub Actions is a powerful and widely used CI/CD tool. If you’ve used Jenkins before, this will feel intuitive. Mastering this flow prepares you for real-world production DevOps pipelines.
